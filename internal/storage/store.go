@@ -33,7 +33,60 @@ func Open(dataDir string) (*Store, error) {
 	if err := store.load(); err != nil {
 		return nil, err
 	}
+	if err := store.recoverClaimedMessages(); err != nil {
+		return nil, err
+	}
 	return store, nil
+}
+
+// OpenView opens an existing snapshot for read-only inspection, e.g. a local
+// command-line terminal. It never creates files, mutates state, or requeues
+// claims. A missing snapshot is reported as an error so operators notice a
+// wrong data directory.
+func OpenView(dataDir string) (*Store, error) {
+	store := &Store{
+		path:     filepath.Join(dataDir, stateFileName),
+		snapshot: domain.EmptySnapshot(),
+		now:      func() time.Time { return time.Now().UTC() },
+	}
+	if _, err := os.Stat(store.path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("no state snapshot found in %s", dataDir)
+		}
+		return nil, fmt.Errorf("inspect state: %w", err)
+	}
+	if err := store.load(); err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// recoverClaimedMessages requeues messages left in the claimed state by a
+// previous process. A claim is an in-memory lease held by one terminal, so a
+// restart cannot trust it; the message must not be lost and must become
+// claimable again.
+func (s *Store) recoverClaimedMessages() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	changed := false
+	candidate := s.snapshot.Clone()
+	for id, message := range candidate.Outbox {
+		if message.RecoverInterruptedClaim(s.now()) {
+			candidate.Outbox[id] = message
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	candidate.Revision = s.snapshot.Revision + 1
+	candidate.UpdatedAt = s.now()
+	if err := writeSnapshot(s.path, candidate); err != nil {
+		return domain.NewError(domain.CodeStorage, err.Error())
+	}
+	s.snapshot = candidate
+	return nil
 }
 
 func (s *Store) load() error {
@@ -78,6 +131,15 @@ func normalizeSnapshot(value domain.Snapshot) (domain.Snapshot, error) {
 	if value.RunIndex == nil {
 		value.RunIndex = map[string]string{}
 	}
+	if value.Outbox == nil {
+		value.Outbox = map[string]domain.OutboxMessage{}
+	}
+	if value.OutboxDedup == nil {
+		value.OutboxDedup = map[string]string{}
+	}
+	if value.OutboxCounter < 0 {
+		return domain.Snapshot{}, fmt.Errorf("outbox sequence cannot be negative")
+	}
 	if err := validateIndexes(value); err != nil {
 		return domain.Snapshot{}, err
 	}
@@ -118,7 +180,31 @@ func validateIndexes(value domain.Snapshot) error {
 		}
 		expectedRuns[run.Code] = id
 	}
-	return compareIndexes("run code", value.RunIndex, expectedRuns)
+	if err := compareIndexes("run code", value.RunIndex, expectedRuns); err != nil {
+		return err
+	}
+
+	expectedDedup := make(map[string]string, len(value.Outbox))
+	highestSequence := int64(0)
+	for id, message := range value.Outbox {
+		if err := message.Validate(); err != nil {
+			return err
+		}
+		if existing, found := expectedDedup[message.DedupKey]; found && existing != id {
+			return fmt.Errorf("outbox dedup index contains a duplicate key")
+		}
+		expectedDedup[message.DedupKey] = id
+		if message.Sequence > highestSequence {
+			highestSequence = message.Sequence
+		}
+	}
+	if err := compareIndexes("outbox dedup", value.OutboxDedup, expectedDedup); err != nil {
+		return err
+	}
+	if value.OutboxCounter < highestSequence {
+		return fmt.Errorf("outbox sequence is behind the highest stored message")
+	}
+	return nil
 }
 
 func compareIndexes(label string, actual, expected map[string]string) error {

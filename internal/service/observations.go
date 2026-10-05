@@ -27,6 +27,20 @@ func (s *Service) AppendObservation(
 		}
 		snapshot.Runs[id] = run.Clone()
 		updated = run.Clone()
+
+		formula, hasFormula := snapshot.Formulas[run.FormulaID]
+		var vessel *domain.Vessel
+		if run.VesselID != nil {
+			if associated, ok := snapshot.Vessels[*run.VesselID]; ok {
+				vessel = &associated
+			}
+		}
+		if hasFormula && observation.TemperatureC > formula.MaxFermentationTempC {
+			if err := enqueueMessage(snapshot, now,
+				temperatureExcursionInput(run, vessel, formula, observation)); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {

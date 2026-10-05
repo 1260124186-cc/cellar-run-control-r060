@@ -35,6 +35,24 @@ func (c *client) call(
 	payload any,
 	expectedVersion *int64,
 ) (response, error) {
+	return c.callWithHeaders(method, path, payload, expectedVersion, nil)
+}
+
+func (c *client) callWithClaim(method, path string, payload any, claimToken *string) (response, error) {
+	headers := map[string]string{}
+	if claimToken != nil {
+		headers["X-Claim-Token"] = *claimToken
+	}
+	return c.callWithHeaders(method, path, payload, nil, headers)
+}
+
+func (c *client) callWithHeaders(
+	method string,
+	path string,
+	payload any,
+	expectedVersion *int64,
+	headers map[string]string,
+) (response, error) {
 	var body io.Reader
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
@@ -52,6 +70,9 @@ func (c *client) call(
 	}
 	if expectedVersion != nil {
 		request.Header.Set("X-Expected-Version", fmt.Sprintf("%d", *expectedVersion))
+	}
+	for key, value := range headers {
+		request.Header.Set(key, value)
 	}
 	raw, err := c.http.Do(request)
 	if err != nil {

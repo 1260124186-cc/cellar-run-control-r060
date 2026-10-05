@@ -130,7 +130,7 @@ func (s *Service) StartRun(
 		snapshot.Vessels[vessel.ID] = vessel
 		updatedRun = run.Clone()
 		updatedVessel = vessel
-		return nil
+		return enqueueMessage(snapshot, s.clock.Now(), fermentationStartedInput(run, vessel, snapshot.Formulas[run.FormulaID].Name))
 	})
 	if err != nil {
 		return domain.FermentationRun{}, domain.Vessel{}, err

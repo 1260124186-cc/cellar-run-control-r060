@@ -6,7 +6,7 @@
     {
       "id": "cmd",
       "path": "cmd/fermentctl",
-      "responsibility": "start the service and run bounded workflow checks"
+      "responsibility": "start the service, run bounded workflow checks, and open the local outbox terminal"
     },
     {
       "id": "config",
@@ -26,17 +26,22 @@
     {
       "id": "service",
       "path": "internal/service",
-      "responsibility": "orchestrate formulas, vessels, runs, and observations"
+      "responsibility": "orchestrate formulas, vessels, runs, observations, and the transactional outbox"
     },
     {
       "id": "storage",
       "path": "internal/storage",
-      "responsibility": "persist and load revisioned JSON snapshots atomically"
+      "responsibility": "persist and load revisioned JSON snapshots atomically and recover interrupted claims"
     },
     {
       "id": "httpapi",
       "path": "internal/httpapi",
       "responsibility": "route HTTP requests and map protocol errors"
+    },
+    {
+      "id": "outboxcli",
+      "path": "internal/outboxcli",
+      "responsibility": "provide a read-only on-machine terminal for the local outbox"
     },
     {
       "id": "workflowcheck",
@@ -112,6 +117,29 @@
         "service",
         "domain",
         "storage"
+      ]
+    },
+    {
+      "id": "local-outbox",
+      "name": "Produce, claim, fail, and recover local duty notifications",
+      "entry": "GET /v1/outbox/messages",
+      "steps": [
+        "approve a formula, start fermentation, record a hot observation, and finish cleaning",
+        "list and filter messages by recipient, run, type, and state",
+        "claim one message exclusively and reject duplicate claims",
+        "fail the claim, reclaim it, and complete it with the claim token",
+        "restart on the same snapshot and verify interrupted claims requeue without loss or duplication",
+        "read the outbox from the on-machine command-line terminal"
+      ],
+      "success": "each business fact produces exactly one durable message that one terminal handles",
+      "failure": "duplicate claims, wrong tokens, and replayed facts are rejected without duplicate messages",
+      "verification": "the check issues real HTTP requests, reopens the durable data directory, and drives the local terminal",
+      "module_ids": [
+        "httpapi",
+        "service",
+        "domain",
+        "storage",
+        "outboxcli"
       ]
     }
   ]

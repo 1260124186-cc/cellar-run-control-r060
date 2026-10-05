@@ -18,6 +18,8 @@ deferred to a later engineering task.
   starts fermentation.
 - Fermentation observer: appends timestamped gravity observations and moves a
   run through conditioning and completion.
+- Duty officer: works the local outbox from a terminal, claims pending
+  notifications, and marks them handled or failed.
 - Integration client: calls the stable JSON API from a local production script.
 
 ## Entities
@@ -97,6 +99,45 @@ time, gravity, temperature, optional note, and receipt time.
 - Gravity must not rise more than 0.010 above the immediately preceding value.
 - Observation sequences are contiguous and start at 1.
 
+### OutboxMessage
+
+A local outbox message contains an identifier, monotonic per-process sequence,
+deduplication key, message type, subject, local recipient role, priority,
+optional formula/run/vessel links, stable detail fields, processing state,
+attempt count, failure history, claim holder with expiry and capability token,
+handling audit fields, version, and timestamps.
+
+States are `pending`, `claimed`, and `handled`. Types are `formula_approved`,
+`fermentation_started`, `temperature_excursion`, and `cleaning_finished`.
+Recipients are the local roles `process_planner` and `cellar_operator`.
+
+- Messages are created only inside the same atomic revision as the business
+  fact that produces them; no business write means no message.
+- The dedup key uniquely identifies the fact. A repeated fact never yields a
+  second message.
+- A temperature observation above the formula's maximum fermentation
+  temperature produces exactly one high-priority excursion, keyed by run and
+  observation sequence.
+- A claim requires an operator and leases the message for 30 to 900 seconds
+  (default 120). Exactly one live claim can exist per message.
+- The claim response carries an opaque token. Completion and failure require
+  the matching `X-Claim-Token`; the token never appears in list or detail
+  views.
+- Replaying a claim while the same operator holds it returns the same token;
+  any other live holder receives `message_claim_conflict`.
+- The claim is a hard lease. After it elapses, the holder's token is rejected,
+  a background sweep returns the message to `pending` every 15 seconds, and
+  any terminal can claim it again.
+- Completion records the holder and moves the message to `handled`, which is
+  terminal.
+- Failure records the reason, increments the attempt count, and returns the
+  message to `pending`.
+- On startup, messages left `claimed` by a previous process are requeued to
+  `pending` and the recovery is itself persisted. No message is lost or
+  duplicated.
+- Nothing leaves the host: there is no SMS, email, webhook, or other external
+  transport, and no browser interface.
+
 ## Connected Workflows
 
 ### 1. Formula Approval
@@ -150,6 +191,27 @@ transitions return stable failures without changing persisted state.
 This path crosses HTTP protocol handling, application orchestration, numeric
 domain rules, and snapshot storage.
 
+### 4. Local Duty Outbox
+
+Public entry points are:
+
+- `GET /v1/outbox/messages`
+- `GET /v1/outbox/messages/{id}`
+- `POST /v1/outbox/messages/{id}/claim`
+- `POST /v1/outbox/messages/{id}/complete`
+- `POST /v1/outbox/messages/{id}/fail`
+- `fermentctl outbox list` and `fermentctl outbox show` on the same machine
+
+The check drives formula approval, fermentation start, a hot observation, and
+cleaning completion; lists and filters the generated messages by recipient,
+run, and state; verifies exclusive claiming with a token; marks a failure and
+reclaims the message; completes it; and reopens the snapshot directory to prove
+a restarted process requeues an interrupted claim without losing or
+duplicating a message.
+
+This path crosses HTTP protocol handling, application orchestration, the
+transactional outbox, claim leases, and snapshot recovery.
+
 ## Modules
 
 - `cmd/fermentctl`: executable entry point for the HTTP service and bounded
@@ -158,13 +220,16 @@ domain rules, and snapshot storage.
 - `internal/clock`: deterministic clock boundary for production and checks.
 - `internal/domain`: entities, validation, state transitions, and metrics.
 - `internal/service`: use-case orchestration and revision coordination.
-- `internal/storage`: snapshot repository, atomic replacement, and locking.
+- `internal/storage`: snapshot repository, atomic replacement, locking, and
+  startup recovery of interrupted outbox claims.
 - `internal/httpapi`: routing, strict JSON decoding, error mapping, and health.
+- `internal/outboxcli`: read-only on-machine terminal for listing and showing
+  outbox messages.
 - `internal/workflowcheck`: real HTTP workflow checks used by the executable.
 
 The dependency direction is:
 
-`cmd -> workflowcheck/httpapi -> service -> domain`
+`cmd -> workflowcheck/httpapi/outboxcli -> service -> domain`
 
 `service -> storage`
 
@@ -202,6 +267,12 @@ Reads use copied values and never expose repository-owned maps or slices. The
 default address is `127.0.0.1:8088`, the request body limit is 1 MiB, and all
 workflow checks use temporary directories.
 
+The snapshot also contains the outbox collection, its dedup index, and its
+sequence counter. Startup normalization validates every message and rejects
+mismatched dedup indexes or a counter behind the highest sequence. Any message
+still held in `claimed` state is requeued and the recovery is committed before
+serving begins.
+
 ## Validation Plan
 
 The baseline declares `testing: deferred` and intentionally contains no unit
@@ -217,10 +288,13 @@ behavior, and exit without external services:
 - `go run ./cmd/fermentctl check formula-approval`
 - `go run ./cmd/fermentctl check vessel-run-lifecycle`
 - `go run ./cmd/fermentctl check observations-completion`
+- `go run ./cmd/fermentctl check local-outbox`
 
 ## Scope Limits
 
 This service does not control physical equipment, connect to a remote identity
-provider, send notifications, expose a browser interface, replicate data, or
-replace laboratory measurements. The API is intended for a trusted local
-network or an internal adapter.
+provider, send SMS, email, webhook, or other external notifications, expose a
+browser interface, replicate data, or replace laboratory measurements. The
+outbox is a local hand-off between business actions and duty terminals on the
+same machine. The API is intended for a trusted local network or an internal
+adapter.

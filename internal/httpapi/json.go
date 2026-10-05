@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/domain"
 )
@@ -53,6 +55,48 @@ func decodeError(err error) error {
 		"must be valid JSON with known fields")
 }
 
+// decodeOptionalJSON behaves like decodeJSON but tolerates a completely empty
+// body, which is convenient for write endpoints that only take headers.
+func decodeOptionalJSON[T any](response http.ResponseWriter, request *http.Request) (T, bool) {
+	var value T
+	if request.Body == nil {
+		return value, true
+	}
+	body := http.MaxBytesReader(response, request.Body, maxRequestBody)
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			writeDomainError(response, domain.NewError(domain.CodeInvalidInput,
+				"request body exceeds 1 MiB"))
+		} else {
+			writeDomainError(response, domain.FieldError(domain.CodeInvalidInput,
+				"body", "must be valid JSON with known fields"))
+		}
+		return value, false
+	}
+	if strings.TrimSpace(string(raw)) == "" {
+		return value, true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		writeDomainError(response, decodeError(err))
+		return value, false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			writeDomainError(response, domain.NewError(domain.CodeInvalidInput,
+				"request body must contain one JSON object"))
+		} else {
+			writeDomainError(response, decodeError(err))
+		}
+		return value, false
+	}
+	return value, true
+}
+
 func writeJSON(response http.ResponseWriter, status int, value any) {
 	response.Header().Set("Content-Type", "application/json; charset=utf-8")
 	response.WriteHeader(status)
@@ -79,13 +123,15 @@ func statusForCode(code domain.Code) int {
 	switch code {
 	case domain.CodeInvalidInput:
 		return http.StatusBadRequest
-	case domain.CodeFormulaNotFound, domain.CodeVesselNotFound, domain.CodeRunNotFound:
+	case domain.CodeFormulaNotFound, domain.CodeVesselNotFound, domain.CodeRunNotFound,
+		domain.CodeMessageNotFound:
 		return http.StatusNotFound
 	case domain.CodeFormulaNameConflict, domain.CodeFormulaState,
 		domain.CodeFormulaInUse, domain.CodeVesselConflict,
 		domain.CodeVesselUnavailable, domain.CodeVesselState,
 		domain.CodeRunConflict, domain.CodeRunState,
-		domain.CodeObservationConflict:
+		domain.CodeObservationConflict, domain.CodeMessageState,
+		domain.CodeMessageClaim:
 		return http.StatusConflict
 	case domain.CodeRevisionConflict:
 		return http.StatusPreconditionFailed

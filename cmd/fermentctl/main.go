@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/clock"
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/config"
@@ -40,13 +41,15 @@ func run(arguments []string) error {
 			return usageError()
 		}
 		return workflowcheck.Run(arguments[1])
+	case "outbox":
+		return runOutbox(arguments[1:], os.Stdout)
 	default:
 		return usageError()
 	}
 }
 
 func usageError() error {
-	return errors.New("usage: fermentctl serve | fermentctl check <workflow>")
+	return errors.New("usage: fermentctl serve | fermentctl check <workflow> | fermentctl outbox [list|show]")
 }
 
 func serve() error {
@@ -71,10 +74,15 @@ func serve() error {
 		IdleTimeout:       cfg.IdleTimeout,
 	}
 
+	rootContext, cancelRoot := context.WithCancel(context.Background())
+	defer cancelRoot()
+	go runClaimReaper(rootContext, app)
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-stop
+		cancelRoot()
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 		defer cancel()
 		if err := server.Shutdown(ctx); err != nil {
@@ -92,4 +100,29 @@ func serve() error {
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.LUTC)
+}
+
+// claimReapInterval is how often elapsed claim leases are returned to the
+// pending queue. Claims are short (default two minutes), so a 15-second sweep
+// keeps the duty board accurate without adding write pressure.
+const claimReapInterval = 15 * time.Second
+
+func runClaimReaper(ctx context.Context, app *service.Service) {
+	ticker := time.NewTicker(claimReapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			requeued, err := app.RequeueExpiredClaims()
+			if err != nil {
+				log.Printf("reap expired claims failed: %v", err)
+				continue
+			}
+			if requeued > 0 {
+				log.Printf("requeued %d expired outbox claim(s)", requeued)
+			}
+		}
+	}
 }

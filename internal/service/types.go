@@ -53,3 +53,24 @@ type ObservationInput struct {
 type FinishCleaningInput struct {
 	ExpectedVersion *int64
 }
+
+type ClaimMessageInput struct {
+	Operator     string
+	ClaimSeconds int
+}
+
+type CompleteMessageInput struct {
+	ClaimToken string
+	Note       string
+}
+
+type FailMessageInput struct {
+	ClaimToken string
+	Reason     string
+}
+
+type MessageFilter struct {
+	State     string
+	Recipient string
+	Type      string
+}

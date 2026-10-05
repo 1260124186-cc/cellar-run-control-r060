@@ -91,7 +91,20 @@ func (s *Service) ApproveFormula(id string, input VersionInput) (domain.Formula,
 		}
 		snapshot.Formulas[id] = formula
 		updated = formula.Clone()
-		return nil
+		return enqueueMessage(snapshot, s.clock.Now(), enqueueInput{
+			DedupKey:  "formula_approved:" + id,
+			Type:      domain.MessageFormulaApproved,
+			Subject:   "Formula approved: " + formula.Name,
+			Recipient: domain.RecipientProcessPlanner,
+			Priority:  domain.MessagePriorityNormal,
+			FormulaID: id,
+			Details: map[string]string{
+				"formula_id":   id,
+				"formula_name": formula.Name,
+				"style":        formula.Style,
+				"approved_at":  formula.ApprovedAt.UTC().Format(time.RFC3339),
+			},
+		})
 	})
 	if err != nil {
 		return domain.Formula{}, err

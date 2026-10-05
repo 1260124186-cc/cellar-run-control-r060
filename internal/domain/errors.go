@@ -23,6 +23,9 @@ const (
 	CodeObservationConflict Code = "observation_conflict"
 	CodeRevisionConflict    Code = "revision_conflict"
 	CodeStorage             Code = "storage_error"
+	CodeMessageNotFound     Code = "message_not_found"
+	CodeMessageState        Code = "invalid_message_state"
+	CodeMessageClaim        Code = "message_claim_conflict"
 )
 
 type Error struct {

@@ -108,7 +108,8 @@ func (s *Service) FinishCleaning(
 		}
 		snapshot.Vessels[id] = vessel
 		updated = vessel
-		return nil
+		return enqueueMessage(snapshot, s.clock.Now(),
+			cleaningFinishedInput(vessel, run, s.clock.Now()))
 	})
 	if err != nil {
 		return domain.Vessel{}, err

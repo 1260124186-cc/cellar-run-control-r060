@@ -3,7 +3,10 @@
 Cellar Run Control is a local Go HTTP service for coordinating a small
 production cellar. It keeps formula approval, vessel availability, active
 fermentation runs, gravity observations, conditioning, completion metrics, and
-vessel cleaning in one deterministic process.
+vessel cleaning in one deterministic process. A local-only outbox turns
+formula approval, fermentation start, temperature excursions, and cleaning
+completion into pending notifications for the duty room; nothing is sent over
+SMS or any external push channel.
 
 This repository is a healthy initialization baseline. It has no intentional
 defects and no automated test suite. Tests are intentionally deferred to a
@@ -49,11 +52,12 @@ go run ./cmd/fermentctl serve
 ## Directory Structure
 
 ```text
-cmd/fermentctl                 service and workflow-check executable
+cmd/fermentctl                 service, local outbox terminal, and workflow checks
 internal/clock                 time boundary
 internal/config                environment configuration
 internal/domain                entities, validation, transitions, metrics
 internal/httpapi               HTTP routes, JSON decoding, errors
+internal/outboxcli             on-machine read-only outbox terminal
 internal/service               use-case orchestration
 internal/storage               revisioned snapshot persistence
 internal/workflowcheck         real HTTP production checks
@@ -94,6 +98,42 @@ Run workflow:
 - `POST /v1/runs/{id}/complete`
 - `POST /v1/runs/{id}/abort`
 
+Local outbox:
+
+- `GET /v1/outbox/messages` (optional filters: `state`, `recipient`, `type`)
+- `GET /v1/outbox/messages/{id}`
+- `POST /v1/outbox/messages/{id}/claim`
+- `POST /v1/outbox/messages/{id}/complete` (`X-Claim-Token` header)
+- `POST /v1/outbox/messages/{id}/fail` (`X-Claim-Token` header)
+
+Business actions produce outbox messages in the same atomic snapshot revision:
+
+- formula approval -> `formula_approved` for the `process_planner`;
+- fermentation start -> `fermentation_started` for the `cellar_operator`;
+- an observation above the formula's maximum fermentation temperature ->
+  `temperature_excursion` (high priority) for the `cellar_operator`, linked to
+  the run and vessel;
+- finishing vessel cleaning -> `cleaning_finished` for the `cellar_operator`.
+
+Message states are `pending`, `claimed`, and `handled`. A terminal claims a
+message with an operator name and an optional `claim_seconds` (30-900, default
+120); the response carries an opaque claim token. Only that terminal can
+complete or fail the claim, using the `X-Claim-Token` header. Completing marks
+the fact handled and it is never delivered again. Failing records the reason
+and returns the message to `pending` so another terminal can claim it.
+Duplicate claims return `message_claim_conflict`; a replay by the same holder
+returns the same token. A claim is a hard lease: once `claim_seconds` elapses,
+the holder's token is rejected and a background sweep (every 15 seconds)
+returns the message to `pending`, where any terminal can claim it.
+
+The same information is available from the on-machine terminal:
+
+```bash
+go run ./cmd/fermentctl outbox list [-state pending|claimed|handled] \
+  [-recipient cellar_operator] [-type temperature_excursion]
+go run ./cmd/fermentctl outbox show -data-dir ./data <message-id>
+```
+
 Writes accept an optional `X-Expected-Version` header. Errors use a stable
 shape:
 
@@ -115,6 +155,7 @@ Run each production workflow check separately:
 go run ./cmd/fermentctl check formula-approval
 go run ./cmd/fermentctl check vessel-run-lifecycle
 go run ./cmd/fermentctl check observations-completion
+go run ./cmd/fermentctl check local-outbox
 ```
 
 Each check creates a temporary snapshot directory, starts the real HTTP
@@ -132,6 +173,22 @@ after that operation succeeds.
 On startup, an existing snapshot is decoded and normalized. Unknown or
 conflicting map indexes are not silently invented; invalid JSON or a negative
 revision stops the process before HTTP serving begins.
+
+## Local Outbox Durability
+
+The outbox is a transactional outbox with no external transport. Each message
+is written inside the same atomic snapshot revision as the business action
+that creates it: if the business write fails, no message exists, and once the
+revision is durable the message survives restarts. A dedup index keyed by the
+business fact (for example `temperature_excursion:<run>:<sequence>`) means a
+confirmed fact is never published twice, even if the action is replayed.
+
+A claim is a short local lease, not durable ownership. When the process starts,
+every message left in `claimed` state by a previous run is requeued to
+`pending` (the change is persisted as a new revision), so a restart during
+handling never loses a message and never leaves it stranded on a dead
+terminal. Failure marks return the message to `pending` with the failure
+recorded; handled messages are terminal and cannot be claimed again.
 
 ## Repair-Ready Boundaries
 
@@ -160,5 +217,7 @@ state transitions, concurrency, persistence failures, and numeric edge cases.
 ## Scope
 
 The service does not control physical equipment, authenticate remote users,
-send notifications, expose a browser interface, or replicate data across
-processes. It is intended for a trusted local network or an internal adapter.
+send SMS, email, webhook, or other external push notifications, replicate data
+across processes, or expose a browser interface. The local outbox and its
+on-machine terminal stay entirely on this host. It is intended for a trusted
+local network or an internal adapter.

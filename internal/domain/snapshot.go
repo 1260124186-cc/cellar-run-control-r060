@@ -11,17 +11,26 @@ type Snapshot struct {
 	NameIndex   map[string]string          `json:"formula_name_index"`
 	VesselIndex map[string]string          `json:"vessel_code_index"`
 	RunIndex    map[string]string          `json:"run_code_index"`
+
+	// Outbox is the local notification outbox. Messages are written in the
+	// same atomic revision as the business fact that produces them.
+	Outbox        map[string]OutboxMessage `json:"outbox"`
+	OutboxDedup   map[string]string        `json:"outbox_dedup_index"`
+	OutboxCounter int64                    `json:"outbox_sequence"`
 }
 
 func EmptySnapshot() Snapshot {
 	return Snapshot{
-		Revision:    0,
-		Formulas:    map[string]Formula{},
-		Vessels:     map[string]Vessel{},
-		Runs:        map[string]FermentationRun{},
-		NameIndex:   map[string]string{},
-		VesselIndex: map[string]string{},
-		RunIndex:    map[string]string{},
+		Revision:      0,
+		Formulas:      map[string]Formula{},
+		Vessels:       map[string]Vessel{},
+		Runs:          map[string]FermentationRun{},
+		NameIndex:     map[string]string{},
+		VesselIndex:   map[string]string{},
+		RunIndex:      map[string]string{},
+		Outbox:        map[string]OutboxMessage{},
+		OutboxDedup:   map[string]string{},
+		OutboxCounter: 0,
 	}
 }
 
@@ -29,6 +38,7 @@ func (s Snapshot) Clone() Snapshot {
 	cloned := EmptySnapshot()
 	cloned.Revision = s.Revision
 	cloned.UpdatedAt = s.UpdatedAt
+	cloned.OutboxCounter = s.OutboxCounter
 	for key, value := range s.Formulas {
 		cloned.Formulas[key] = value.Clone()
 	}
@@ -51,6 +61,12 @@ func (s Snapshot) Clone() Snapshot {
 	}
 	for key, value := range s.RunIndex {
 		cloned.RunIndex[key] = value
+	}
+	for key, value := range s.Outbox {
+		cloned.Outbox[key] = value.Clone()
+	}
+	for key, value := range s.OutboxDedup {
+		cloned.OutboxDedup[key] = value
 	}
 	return cloned
 }
