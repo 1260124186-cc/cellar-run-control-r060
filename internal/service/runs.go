@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/domain"
@@ -130,6 +131,27 @@ func (s *Service) StartRun(
 		snapshot.Vessels[vessel.ID] = vessel
 		updatedRun = run.Clone()
 		updatedVessel = vessel
+		if err := emitMessage(
+			snapshot,
+			"run.started:"+run.ID,
+			domain.MessageRunFermentationStarted,
+			domain.RecipientDutyOperator,
+			run.ID,
+			"Fermentation started: "+run.Code,
+			fmt.Sprintf("Run %s entered fermentation in vessel %s.", run.Code, vessel.Code),
+			map[string]any{
+				"run_id":           run.ID,
+				"run_code":         run.Code,
+				"vessel_id":        vessel.ID,
+				"vessel_code":      vessel.Code,
+				"formula_id":       run.FormulaID,
+				"started_at":       run.StartedAt,
+				"planned_volume_l": run.PlannedVolumeL,
+			},
+			s.clock.Now(),
+		); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {

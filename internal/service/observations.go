@@ -1,6 +1,10 @@
 package service
 
-import "github.com/1260124186-cc/solo-0016-cellar-run-control/internal/domain"
+import (
+	"fmt"
+
+	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/domain"
+)
 
 func (s *Service) AppendObservation(
 	id string,
@@ -27,6 +31,37 @@ func (s *Service) AppendObservation(
 		}
 		snapshot.Runs[id] = run.Clone()
 		updated = run.Clone()
+
+		formula, hasFormula := snapshot.Formulas[run.FormulaID]
+		if hasFormula && observation.TemperatureC > formula.MaxFermentationTempC {
+			if err := emitMessage(
+				snapshot,
+				fmt.Sprintf("run.temperature-breach:%s:%d", run.ID, observation.Sequence),
+				domain.MessageTemperatureBreach,
+				domain.RecipientDutyObserver,
+				run.ID,
+				fmt.Sprintf("Temperature breach: %s observation %d", run.Code, observation.Sequence),
+				fmt.Sprintf(
+					"Observation %d for run %s recorded %.2f C, above the %s formula limit of %.2f C.",
+					observation.Sequence, run.Code, observation.TemperatureC,
+					formula.Name, formula.MaxFermentationTempC,
+				),
+				map[string]any{
+					"run_id":        run.ID,
+					"run_code":      run.Code,
+					"formula_id":    run.FormulaID,
+					"formula_name":  formula.Name,
+					"sequence":      observation.Sequence,
+					"observed_at":   observation.ObservedAt,
+					"temperature_c": observation.TemperatureC,
+					"max_allowed_c": formula.MaxFermentationTempC,
+					"gravity":       observation.Gravity,
+				},
+				now,
+			); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {

@@ -4,7 +4,9 @@
 
 Cellar Run Control is a local Go HTTP service for a small production cellar.
 It coordinates approved formulas, vessel reservation, active fermentation
-runs, gravity observations, conditioning, completion, and vessel release.
+runs, gravity observations, conditioning, completion, vessel release, and a
+machine-local duty outbox. No SMS, email, webhook, or other external push is
+ever sent; notifications are visible only through the local API and page.
 
 The project is a healthy initialization baseline. It contains no intentional
 defects, no model traces, and no automated tests. Verification is intentionally
@@ -97,6 +99,37 @@ time, gravity, temperature, optional note, and receipt time.
 - Gravity must not rise more than 0.010 above the immediately preceding value.
 - Observation sequences are contiguous and start at 1.
 
+### OutboxMessage
+
+A message is a machine-local notification about one confirmed business fact.
+It contains an identifier, monotonic sequence, dedup key, type, local recipient
+role, optional associated run identifier, subject, detail, structured payload,
+processing state, claim token, claiming terminal, attempt count, lease expiry,
+and timestamps.
+
+States are `pending`, `claimed`, and `handled`.
+
+- Messages are written inside the same atomic revision as their business fact:
+  formula approval, run start into fermentation, an observation whose
+  temperature exceeds the approved formula maximum, and vessel cleaning
+  completion.
+- A dedup key plus the state-machine transition guards guarantee a confirmed
+  fact is emitted exactly once; rejected or repeated transitions emit nothing.
+- `pending -> claimed` assigns one random claim token, one terminal
+  identifier, and a fixed lease. Only the holder of the current token can move
+  the message to `handled`; completion is terminal and never reopens.
+- A competing claim while the lease is live is rejected with a stable code.
+- A claimed message whose lease has expired may be reclaimed by another
+  terminal; reclaim rotates the token and increments the attempt count, so the
+  stale token can no longer complete it.
+- Listing and reading never return the claim token; it appears only in the
+  claim response.
+- Restart recovery rehydrates pending, claimed, and handled messages from the
+  snapshot. An unfinished claim is neither lost nor completed by restart; a
+  failed completion leaves the message available.
+- Recipients are local duty roles only: `duty-planner`, `duty-operator`, and
+  `duty-observer`.
+
 ## Connected Workflows
 
 ### 1. Formula Approval
@@ -150,16 +183,42 @@ transitions return stable failures without changing persisted state.
 This path crosses HTTP protocol handling, application orchestration, numeric
 domain rules, and snapshot storage.
 
+### 4. Duty Outbox
+
+Public entry points are:
+
+- `GET /v1/outbox/messages`
+- `GET /v1/outbox/messages/{id}`
+- `POST /v1/outbox/claims`
+- `POST /v1/outbox/messages/{id}/claim`
+- `POST /v1/outbox/messages/{id}/complete`
+- `POST /v1/outbox/messages/{id}/release`
+- `GET /duty/`
+
+The client drives the other workflows so that messages are produced, lists
+them with recipient, run link, and state filters, claims the next eligible
+message from one terminal, proves a competing terminal cannot complete it,
+completes it with the exclusive token, and reopens the same snapshot in a new
+process to verify pending, claimed, and handled messages survive. An expired
+lease permits takeover by another terminal and invalidates the old token.
+
+This path crosses HTTP protocol handling, application orchestration, local
+claim state, and snapshot recovery.
+
 ## Modules
 
 - `cmd/fermentctl`: executable entry point for the HTTP service and bounded
   workflow checks.
 - `internal/config`: environment and command-line configuration.
 - `internal/clock`: deterministic clock boundary for production and checks.
-- `internal/domain`: entities, validation, state transitions, and metrics.
-- `internal/service`: use-case orchestration and revision coordination.
-- `internal/storage`: snapshot repository, atomic replacement, and locking.
-- `internal/httpapi`: routing, strict JSON decoding, error mapping, and health.
+- `internal/domain`: entities, validation, state transitions, metrics, and
+  outbox message invariants.
+- `internal/service`: use-case orchestration, transactional message emission,
+  claim/lease coordination, and revision coordination.
+- `internal/storage`: snapshot repository, atomic replacement, locking, and
+  outbox index/message normalization on recovery.
+- `internal/httpapi`: routing, strict JSON decoding, error mapping, health,
+  and the self-contained local duty room page.
 - `internal/workflowcheck`: real HTTP workflow checks used by the executable.
 
 The dependency direction is:
@@ -217,10 +276,11 @@ behavior, and exit without external services:
 - `go run ./cmd/fermentctl check formula-approval`
 - `go run ./cmd/fermentctl check vessel-run-lifecycle`
 - `go run ./cmd/fermentctl check observations-completion`
+- `go run ./cmd/fermentctl check outbox-duty-room`
 
 ## Scope Limits
 
 This service does not control physical equipment, connect to a remote identity
-provider, send notifications, expose a browser interface, replicate data, or
-replace laboratory measurements. The API is intended for a trusted local
-network or an internal adapter.
+provider, send external notifications (SMS, email, webhook, or push), replicate
+data, or replace laboratory measurements. Its outbox is strictly local and the
+API is intended for a trusted local network or an internal adapter.

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/domain"
@@ -108,6 +109,28 @@ func (s *Service) FinishCleaning(
 		}
 		snapshot.Vessels[id] = vessel
 		updated = vessel
+		if err := emitMessage(
+			snapshot,
+			"vessel.cleaning-finished:"+id+":"+run.ID,
+			domain.MessageVesselCleaningFinished,
+			domain.RecipientDutyOperator,
+			run.ID,
+			"Cleaning finished: "+vessel.Code,
+			fmt.Sprintf(
+				"Vessel %s completed cleaning for run %s and is available again.",
+				vessel.Code, run.Code,
+			),
+			map[string]any{
+				"vessel_id":   id,
+				"vessel_code": vessel.Code,
+				"run_id":      run.ID,
+				"run_code":    run.Code,
+				"run_state":   string(run.State),
+			},
+			s.clock.Now(),
+		); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {

@@ -91,6 +91,23 @@ func (s *Service) ApproveFormula(id string, input VersionInput) (domain.Formula,
 		}
 		snapshot.Formulas[id] = formula
 		updated = formula.Clone()
+		if err := emitMessage(
+			snapshot,
+			"formula.approved:"+id,
+			domain.MessageFormulaApproved,
+			domain.RecipientDutyPlanner,
+			"",
+			"Formula approved: "+formula.Name,
+			"Formula "+id+" ("+formula.Name+") has been approved and can be attached to runs.",
+			map[string]any{
+				"formula_id": id,
+				"name":       formula.Name,
+				"style":      formula.Style,
+			},
+			s.clock.Now(),
+		); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {

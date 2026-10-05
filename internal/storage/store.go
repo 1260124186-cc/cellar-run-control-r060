@@ -78,7 +78,19 @@ func normalizeSnapshot(value domain.Snapshot) (domain.Snapshot, error) {
 	if value.RunIndex == nil {
 		value.RunIndex = map[string]string{}
 	}
+	if value.Messages == nil {
+		value.Messages = map[string]domain.OutboxMessage{}
+	}
+	if value.MessageDedup == nil {
+		value.MessageDedup = map[string]string{}
+	}
+	if value.MessageSequence < 0 {
+		return domain.Snapshot{}, fmt.Errorf("message sequence cannot be negative")
+	}
 	if err := validateIndexes(value); err != nil {
+		return domain.Snapshot{}, err
+	}
+	if err := validateMessages(&value); err != nil {
 		return domain.Snapshot{}, err
 	}
 	return value, nil
@@ -118,7 +130,62 @@ func validateIndexes(value domain.Snapshot) error {
 		}
 		expectedRuns[run.Code] = id
 	}
-	return compareIndexes("run code", value.RunIndex, expectedRuns)
+	if err := compareIndexes("run code", value.RunIndex, expectedRuns); err != nil {
+		return err
+	}
+
+	expectedMessages := make(map[string]string, len(value.Messages))
+	for id, message := range value.Messages {
+		if message.DedupKey == "" {
+			return fmt.Errorf("message %s has an empty dedup key", id)
+		}
+		if existing, found := expectedMessages[message.DedupKey]; found && existing != id {
+			return fmt.Errorf("message dedup index contains a duplicate key")
+		}
+		expectedMessages[message.DedupKey] = id
+	}
+	return compareIndexes("message dedup", value.MessageDedup, expectedMessages)
+}
+
+// validateMessages enforces the state invariants the recovery path relies on
+// and reconciles the derived monotonic sequence counter without inventing
+// business data.
+func validateMessages(value *domain.Snapshot) error {
+	var maxSequence int64
+	for id, message := range value.Messages {
+		if message.ID != id {
+			return fmt.Errorf("message %s does not own its snapshot key", id)
+		}
+		if message.Sequence < 1 {
+			return fmt.Errorf("message %s has an invalid sequence", id)
+		}
+		if message.Sequence > maxSequence {
+			maxSequence = message.Sequence
+		}
+		switch message.State {
+		case domain.MessagePending, domain.MessageClaimed, domain.MessageHandled:
+		default:
+			return fmt.Errorf("message %s has an unknown state %q", id, message.State)
+		}
+		if message.State == domain.MessageHandled {
+			if message.HandledAt == nil {
+				return fmt.Errorf("handled message %s lacks a handled timestamp", id)
+			}
+			if message.ClaimToken != "" {
+				return fmt.Errorf("handled message %s must not retain a claim token", id)
+			}
+		}
+		if message.State == domain.MessageClaimed {
+			if message.ClaimToken == "" || message.ClaimedBy == "" ||
+				message.LeaseExpiresAt == nil {
+				return fmt.Errorf("claimed message %s lacks claim metadata", id)
+			}
+		}
+	}
+	if value.MessageSequence < maxSequence {
+		value.MessageSequence = maxSequence
+	}
+	return nil
 }
 
 func compareIndexes(label string, actual, expected map[string]string) error {

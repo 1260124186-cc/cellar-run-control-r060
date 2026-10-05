@@ -21,12 +21,12 @@
     {
       "id": "domain",
       "path": "internal/domain",
-      "responsibility": "entities, validation, state transitions, and metrics"
+      "responsibility": "entities, validation, state transitions, metrics, and local outbox messages"
     },
     {
       "id": "service",
       "path": "internal/service",
-      "responsibility": "orchestrate formulas, vessels, runs, and observations"
+      "responsibility": "orchestrate formulas, vessels, runs, observations, and the duty outbox"
     },
     {
       "id": "storage",
@@ -36,7 +36,7 @@
     {
       "id": "httpapi",
       "path": "internal/httpapi",
-      "responsibility": "route HTTP requests and map protocol errors"
+      "responsibility": "route HTTP requests, map protocol errors, and serve the local duty room page"
     },
     {
       "id": "workflowcheck",
@@ -107,6 +107,27 @@
       "success": "returns computed metrics and a vessel in cleaning state",
       "failure": "returns a stable range, sequence, time, state, or count error",
       "verification": "the check issues real HTTP requests and rejects malformed observations",
+      "module_ids": [
+        "httpapi",
+        "service",
+        "domain",
+        "storage"
+      ]
+    },
+    {
+      "id": "outbox-duty-room",
+      "name": "Emit local notifications, claim them on one terminal, and recover across restart",
+      "entry": "POST /v1/outbox/claims",
+      "steps": [
+        "business actions write outbox messages in the same atomic revision as the fact",
+        "a duty terminal claims the oldest eligible message and receives an exclusive token",
+        "only that terminal can complete the message; competing claims and forged tokens are rejected",
+        "a restart reopens the same snapshot with pending, claimed, and handled messages intact",
+        "an expired lease lets another desk take over, invalidating the stale token"
+      ],
+      "success": "returns recipient, linked run, claim state, and one terminal completes each message",
+      "failure": "returns stable not-claimable, claim-conflict, or already-handled errors without duplicates",
+      "verification": "the check issues real HTTP requests including a simulated process restart on the same snapshot",
       "module_ids": [
         "httpapi",
         "service",

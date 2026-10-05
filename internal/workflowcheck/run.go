@@ -4,12 +4,18 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"os"
+	"time"
 
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/clock"
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/httpapi"
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/service"
 	"github.com/1260124186-cc/solo-0016-cellar-run-control/internal/storage"
 )
+
+// currentCheckAPI lets the outbox check claim a message immediately before a
+// simulated restart. It is safe because checks run sequentially in one
+// process.
+var currentCheckAPI *client
 
 func Run(name string) error {
 	dataDir, err := os.MkdirTemp("", "cellar-run-check-*")
@@ -22,10 +28,12 @@ func Run(name string) error {
 	if err != nil {
 		return err
 	}
-	app := service.New(store, clock.System{})
+	clockSource := clock.NewFixed(time.Now().UTC())
+	app := service.New(store, clockSource)
 	server := httptest.NewServer(httpapi.NewHandler(app))
 	defer server.Close()
 	api := newClient(server.URL)
+	currentCheckAPI = api
 
 	switch name {
 	case "formula-approval":
@@ -38,6 +46,10 @@ func Run(name string) error {
 		}
 	case "observations-completion":
 		if err := observationsCompletion(api); err != nil {
+			return err
+		}
+	case "outbox-duty-room":
+		if err := outboxDutyRoom(api, clockSource, dataDir); err != nil {
 			return err
 		}
 	default:
